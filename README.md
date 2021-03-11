@@ -1,3 +1,3 @@
 # SVM-for-CSharp
-Support Vector Machine(SVM) class library for C#
+C# implementation of Support Vector Machine(SVM)
 This class library is implemented from scratch.
