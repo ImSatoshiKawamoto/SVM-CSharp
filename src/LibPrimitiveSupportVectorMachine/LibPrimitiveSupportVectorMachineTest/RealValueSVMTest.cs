@@ -10,7 +10,7 @@ namespace LibPrimitiveSupportVectorMachineTest
         [TestMethod]
         public void GradientDescentOptimizeTest()
         {
-            RealValueSVM svm = new RealValueSVM(2, false);
+            RealValueSVM svm = new RealValueSVM(2, RealValueSVM.RealKernelType.Linear);
 
             List<double> list1 = new List<double>();
             list1.Add(1.0);
@@ -32,6 +32,13 @@ namespace LibPrimitiveSupportVectorMachineTest
 
             MathVector vec3 = new MathVector(list3);
             svm.AddData(vec3, 1.0);
+
+            List<MathVector> xList = new List<MathVector>();
+            xList.Add(vec1);
+            xList.Add(vec2);
+            xList.Add(vec3);
+
+            svm.CreatePredictCache(xList);
 
             for (int n = 0; n < 5000; n++)
             {
@@ -51,7 +58,7 @@ namespace LibPrimitiveSupportVectorMachineTest
         [TestMethod]
         public void PegasosOptimizeTest()
         {
-            RealValueSVM svm = new RealValueSVM(2, true);
+            RealValueSVM svm = new RealValueSVM(2, RealValueSVM.RealKernelType.Gaussian);
 
             List<double> list1 = new List<double>();
             list1.Add(1.0);
@@ -73,6 +80,13 @@ namespace LibPrimitiveSupportVectorMachineTest
 
             MathVector vec3 = new MathVector(list3);
             svm.AddData(vec3, 1.0);
+
+            List<MathVector> xList = new List<MathVector>();
+            xList.Add(vec1);
+            xList.Add(vec2);
+            xList.Add(vec3);
+
+            svm.CreatePredictCache(xList);
 
             for (int n = 0; n < 2000; n++)
             {

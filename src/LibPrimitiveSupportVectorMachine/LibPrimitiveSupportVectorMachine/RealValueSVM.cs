@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 
 namespace LibPrimitiveSupportVectorMachine
@@ -9,10 +10,6 @@ namespace LibPrimitiveSupportVectorMachine
     /// </summary>
     public class RealValueSVM
     {
-        /// <summary>
-        /// Pegasousによる反復計算時間
-        /// </summary>
-        private double PegasousTime;
 
         private bool needToRecalculateW;
 
@@ -26,28 +23,46 @@ namespace LibPrimitiveSupportVectorMachine
 
         private double eta = 0.001; // [TODO]0.001
 
-        private double sigma;
+        /// <summary>
+        /// RBFカーネルのパラメータ
+        /// </summary>
+        public double Sigma { get; private set; }
 
-        private RealKernelType kernel = RealKernelType.Linear;
+        private RealKernelType kernel;
 
-        private double C = 100.0;
+        /// <summary>
+        /// Cパラメータ
+        /// </summary>
+        public double C { get; private set; }
 
-        private bool usePagasos;
+        private readonly GradType gradType = GradType.AdaDelta;
 
-        private int pegasosIterationCount;
+        /// <summary>
+        /// xk_xjの計算結果
+        /// </summary>
+        private Dictionary<(int k, int j), double> kernalCaluculatedResultCash;
 
-        public RealValueSVM(int dimension, bool usePagasos, int pegasosIterationCount = 300, double sigma = 1.0)
+        public RealValueSVM(
+            int dimension,
+            RealKernelType kernel,
+            double C = 256,
+            double sigma = 0.005)
         {
-            this.PegasousTime = 0.0;
             this.needToRecalculateW = true;
             this.needToRecalculateB = true;
-            this.usePagasos = usePagasos;
-            this.pegasosIterationCount = pegasosIterationCount;
             this.dimension = dimension;
             this.r = new Random(1234);
             this.dataList = new List<SignalData>();
+            this.kernel = kernel;
             //this.kernelType = KernelType.Linear; // kernelType;
-            this.sigma = sigma;
+            this.C = C;
+            this.Sigma = sigma;
+            this.kernalCaluculatedResultCash = new Dictionary<(int k, int j), double>();
+        }
+
+        public void GridSearchSigma()
+        {
+
         }
 
         public void AddData(MathVector x, double y)
@@ -59,73 +74,13 @@ namespace LibPrimitiveSupportVectorMachine
 
             SignalData data = new SignalData()
             {
-                Alpha = this.usePagasos ? 0.0 : this.r.NextDouble() * 10.0,
-                AlphaPegasous = 0.0,
+                Alpha = this.r.NextDouble() * 10.0,
                 X = x,
-                Y = y
+                Y = y,
+                AlphaAdaDelta = new RealAdaDeltaParam()
             };
 
             this.dataList.Add(data);
-        }
-
-        private void LearnByPegasoous(int iteration)
-        {
-            double lambda = 1.0;
-
-            for (int t = 1; t <= iteration; t++)
-            {
-                this.PegasousTime += 1.0;
-                this.LearnByPegasousInner(this.PegasousTime);
-            }
-
-            // Alphaのセット
-            for (int k = 0; k < this.dataList.Count; k++)
-            {
-                this.dataList[k].Alpha = this.dataList[k].AlphaPegasous / lambda / this.PegasousTime;
-            }
-
-            this.needToRecalculateW = true;
-            this.needToRecalculateB = true;
-        }
-
-        private void LearnByPegasousInner(double time)
-        {
-            double lambda = 1.0;
-
-            int last = this.dataList.Count - 1;
-
-            int t = this.r.Next(0, last);
-            double coop = 1.0 / lambda / time;
-
-            double y1 = this.dataList[t].Y;
-            MathVector x1 = this.dataList[t].X;
-            double total = 0.0;
-
-            for (int k = 0; k < this.dataList.Count; k++)
-            {
-                if(k == t) { continue; }
-
-                double y2 = this.dataList[k].Y;
-                MathVector x2 = this.dataList[k].X;
-                double alpha2 = this.dataList[k].AlphaPegasous;
-                double work = 0.0;
-
-                if (this.kernel == RealKernelType.Linear)
-                {
-                    work = y1 * coop * y2 * alpha2 * x1 * x2;
-                }
-                else
-                {
-                    work = y1 * coop * y2 * alpha2 * this.GaussKernel(x1, x2);
-                }
-
-                total += work;
-            }
-
-            if(total < 1)
-            {
-                this.dataList[t].AlphaPegasous += 1.0;
-            }
         }
 
         /// <summary>
@@ -134,26 +89,51 @@ namespace LibPrimitiveSupportVectorMachine
         /// <param name="threadCount"></param>
         public void LearnThreading(int threadCount)
         {
-            if (this.usePagasos)
+            if (this.kernalCaluculatedResultCash.Count == 0)
             {
-                this.LearnByPegasoous(this.pegasosIterationCount);
-            }
-            else
-            {
-                var taskList = new Task[threadCount];
+                // キャッシュ構築
+                Console.WriteLine("カーネル計算キャッシュ構築");
 
-                for (var i = 0; i < threadCount; i++)
+                for (int k = 0; k < this.dataList.Count; k++)
                 {
-                    var threadIndex = i;
-
-                    taskList[threadIndex] = Task.Factory.StartNew(() =>
+                    for (int j = 0; j < this.dataList.Count; j++)
                     {
-                        this.LearnPartial(threadIndex, threadCount);
-                    });
+                        MathVector xk = this.dataList[k].X;
+                        MathVector xj = this.dataList[j].X;
+
+                        double xk_xj = 0.0;
+
+                        switch (this.kernel)
+                        {
+                            case RealKernelType.Linear:
+                                xk_xj = xk * xj;
+                                break;
+
+                            case RealKernelType.Gaussian:
+                                xk_xj = GaussKernel(xk, xj);
+                                break;
+                        }
+
+                        this.kernalCaluculatedResultCash[(k, j)] = xk_xj;
+                    }
                 }
 
-                Task.WaitAll(taskList);
+                Console.WriteLine("カーネル計算キャッシュ構築完了");
             }
+
+            var taskList = new Task[threadCount];
+
+            for (var i = 0; i < threadCount; i++)
+            {
+                var threadIndex = i;
+
+                taskList[threadIndex] = Task.Factory.StartNew(() =>
+                {
+                    this.LearnPartial(threadIndex, threadCount);
+                });
+            }
+
+            Task.WaitAll(taskList);
 
             this.needToRecalculateW = true;
             this.needToRecalculateB = true;
@@ -180,30 +160,28 @@ namespace LibPrimitiveSupportVectorMachine
                         MathVector xk = this.dataList[k].X;
                         MathVector xj = this.dataList[j].X;
 
-                        double dLdA1 = -alpha * yk * yj * xk * xj;
-                        //double dLdA1 = -alpha * yk * yj * this.KernelFunc(xk, xj);
+                        double xk_xj = this.kernalCaluculatedResultCash[(k, j)];
 
-                        switch (this.kernel)
-                        {
-                            case RealKernelType.Linear:
-                                {
-                                    dLdA1 = -alpha * yk * yj * xk * xj;
-                                }
-                                break;
-
-                            case RealKernelType.Gaussian:
-                                {
-                                    dLdA1 = -alpha * yk * yj * GaussKernel(xk, xj);
-                                }
-                                break;
-                        }
-
+                        double dLdA1 = -alpha * yk * yj * xk_xj;
                         dLdA += dLdA1;
                     }
 
                     dLdA += 1.0;
 
-                    this.dataList[k].Alpha += this.eta * dLdA;
+                    double delta = 0.0;
+
+                    switch (this.gradType)
+                    {
+                        case GradType.AdaDelta:
+                            delta = this.dataList[k].AlphaAdaDelta.GetDelta(dLdA); // .GetDelta(dLdA.Real);
+                            break;
+
+                        case GradType.SGD:
+                            delta = this.eta * dLdA; // SGD
+                            break;
+                    }
+
+                    this.dataList[k].Alpha += delta; // this.eta * dLdA;
 
                     if (this.dataList[k].Alpha < 0)
                     {
@@ -251,6 +229,55 @@ namespace LibPrimitiveSupportVectorMachine
 
         private double b = 0.0;
 
+
+        private double BQuick()
+        {
+            if (!this.needToRecalculateB)
+            {
+                return this.b;
+            }
+
+            double result = 0.0;
+            SignalData signal = this.dataList.Where(entity => entity.Alpha > 0).First();
+
+            switch (this.kernel)
+            {
+                case RealKernelType.Linear:
+                    {
+                        MathVector w = this.W();
+
+                        // サポートベクターからオフセットbを逆算
+                        double b = w * signal.X - signal.Y;
+                        result = b;
+                    }
+                    break;
+
+                case RealKernelType.Gaussian:
+                    {
+                        // サポートベクターからオフセットbを逆算
+                        double wx = 0;
+
+                        foreach (SignalData data in this.dataList)
+                        {
+                            if (data.Alpha > 0)
+                            {
+                                wx += data.Alpha * data.Y * GaussKernel(data.X, signal.X);
+                            }
+                        }
+
+                        double b = wx - signal.Y;
+                        result = b;
+                    }
+
+                    break;
+            }
+
+            this.needToRecalculateB = false;
+            this.b = result;
+
+            return result;
+        }
+
         /// <summary>
         /// オフセットを取得(再計算の必要がある場合は再計算します)
         /// </summary>
@@ -263,7 +290,6 @@ namespace LibPrimitiveSupportVectorMachine
             }
 
             double result = 0.0;
-
 
             switch (this.kernel)
             {
@@ -317,6 +343,7 @@ namespace LibPrimitiveSupportVectorMachine
                             this.b = result;
                         }
                     }
+
                     break;
             }
 
@@ -358,52 +385,191 @@ namespace LibPrimitiveSupportVectorMachine
             return w;
         }
 
-        public bool Classify(MathVector x)
-        {
-            double f = 0.0;
+        private Dictionary<(MathVector x1, MathVector x2), double> kernelPredictCashe = new Dictionary<(MathVector x1, MathVector x2), double>();
 
-            switch (this.kernel)
+        public void CreatePredictCache(IEnumerable<MathVector> xList)
+        {
+            Console.WriteLine("予測用のキャッシュ構築");
+
+            foreach (MathVector x in xList)
             {
-                case RealKernelType.Linear:
-                    if (this.usePagasos)
+                foreach (SignalData data in this.dataList)
+                {
+                    switch (this.kernel)
                     {
-                        // f = this.W() * x;
-                        f = this.W() * x - this.B();
+                        case RealKernelType.Linear:
+                            double kx = data.X * x;
+                            this.kernelPredictCashe[(x, data.X)] = kx;
+
+                            break;
+
+                        case RealKernelType.Gaussian:
+                            double kxr = GaussKernel(data.X, x);
+                            this.kernelPredictCashe[(x, data.X)] = kxr;
+
+                            break;
+                    }
+                }
+            }
+
+            Console.WriteLine("予測用のキャッシュ構築完了");
+        }
+
+        /// <summary>
+        /// 混同行列形式の予測結果を返します
+        /// </summary>
+        /// <param name="xList">入力データのリスト</param>
+        /// <param name="answer">正解データ</param>
+        /// <param name="threadCount">スレッド数</param>
+        /// <returns>混同行列</returns>
+        public (int tp, int tn, int fp, int fn) PredictTest(
+            IEnumerable<MathVector> xList,
+            Dictionary<MathVector, bool> answer,
+            int threadCount)
+        {
+            // データの振り分け
+            List<MathVector>[] xListAry = new List<MathVector>[threadCount];
+            (int tp, int tn, int fp, int fn)[] resultAry = new (int tp, int tn, int fp, int fn)[threadCount];
+
+            for (int n = 0; n < threadCount; n++)
+            {
+                xListAry[n] = new List<MathVector>();
+            }
+
+            int idx = 0;
+
+            foreach (MathVector x in xList)
+            {
+                xListAry[idx].Add(x);
+
+                idx++;
+                idx %= threadCount;
+            }
+
+            var taskList = new Task[threadCount];
+
+            for (var i = 0; i < threadCount; i++)
+            {
+                var threadIndex = i;
+
+                taskList[threadIndex] = Task.Factory.StartNew(() =>
+                {
+                    resultAry[threadIndex] = this.PredictTestInner(xListAry[threadIndex], answer);
+                });
+            }
+
+            Task.WaitAll(taskList);
+
+            int tp = 0;
+            int tn = 0;
+            int fp = 0;
+            int fn = 0;
+
+            foreach ((int tp, int tn, int fp, int fn) item in resultAry)
+            {
+                tp += item.tp;
+                tn += item.tn;
+                fp += item.fp;
+                fn += item.fn;
+            }
+
+            return (tp, tn, fp, fn);
+        }
+
+        /// <summary>
+        /// 混同行列形式の予測結果を返します
+        /// </summary>
+        /// <param name="xList">入力データのリスト</param>
+        /// <param name="answer">正解データ</param>
+        /// <returns>混同行列</returns>
+        private (int tp, int tn, int fp, int fn) PredictTestInner(
+            IEnumerable<MathVector> xList,
+            Dictionary<MathVector, bool> answer)
+        {
+            int tp = 0;
+            int tn = 0;
+            int fp = 0;
+            int fn = 0;
+
+            foreach (MathVector x in xList)
+            {
+                bool predict = this.Classify(x);
+
+                if (predict)
+                {
+                    if (predict == answer[x])
+                    {
+                        tp++;
                     }
                     else
                     {
-                        f = this.W() * x - this.B();
+                        fp++;
                     }
-
-                    break;
-
-                case RealKernelType.Gaussian:
+                }
+                else
+                {
+                    if (predict == answer[x])
                     {
-                        double wx = 0;
-
-                        foreach (SignalData data in this.dataList)
-                        {
-                            if (data.Alpha > 0)
-                            {
-                                wx += data.Alpha * data.Y * GaussKernel(data.X, x);
-                            }
-                        }
-
-                        if (this.usePagasos)
-                        {
-                            // f = wx;
-                            f = wx - this.B();
-                        }
-                        else
-                        {
-                            f = wx - this.B();
-                        }
+                        tn++;
                     }
-
-                    break;
+                    else
+                    {
+                        fn++;
+                    }
+                }
             }
 
-            //Console.WriteLine(string.Format("\t\tRe(f) : {0}, Im(f) : {1}", f.Real, f.Im));
+            if(tp==0 || tn == 0)
+            {
+                foreach (MathVector x in xList)
+                {
+                    this.Classify(x, true);
+                }
+            }
+
+            return (tp, tn, fp, fn);
+        }
+
+        public bool Classify(MathVector x, bool echo = false)
+        {
+            double f = 0.0;
+            double wx = 0.0;
+
+            foreach (SignalData data in this.dataList)
+            {
+                if (data.Alpha > 0)
+                {
+                    (MathVector x1, MathVector x2) key = (x, data.X);
+                    double kernelInnerProduct = 0.0;
+
+                    if (this.kernelPredictCashe.ContainsKey(key))
+                    {
+                        kernelInnerProduct = this.kernelPredictCashe[key];
+                    }
+                    else
+                    {
+                        switch (this.kernel)
+                        {
+                            case RealKernelType.Linear:
+                                kernelInnerProduct = data.X * x;
+                                break;
+
+                            case RealKernelType.Gaussian:
+                                kernelInnerProduct = GaussKernel(data.X, x);
+                                break;
+                        }
+                    }
+
+                    wx += data.Alpha * data.Y * kernelInnerProduct;
+                }
+            }
+
+            f = wx - this.BQuick();
+
+            if (echo)
+            {
+                Console.WriteLine(string.Format("wx : {0}, b : {1}", wx, this.BQuick()));
+            }
 
             if (f > 0)
             {
@@ -418,8 +584,8 @@ namespace LibPrimitiveSupportVectorMachine
         private double GaussKernel(MathVector x, MathVector mu)
         {
             MathVector dif = x - mu;
-            double wa = (dif * dif) * (-1.0) / this.sigma / this.sigma;
-            double result =Math.Exp(wa);
+            double wa = (dif * dif) * (-1.0) / this.Sigma / this.Sigma;
+            double result = Math.Exp(wa);
             return result;
         }
 
@@ -461,6 +627,12 @@ namespace LibPrimitiveSupportVectorMachine
             Gaussian = 2,
         }
 
+        public enum GradType : int
+        {
+            SGD = 1,
+            AdaDelta = 2,
+        }
+
         public class SignalData
         {
             /// <summary>
@@ -468,7 +640,7 @@ namespace LibPrimitiveSupportVectorMachine
             /// </summary>
             public double Alpha { get; set; }
 
-            public double AlphaPegasous { get; set; }
+            public RealAdaDeltaParam AlphaAdaDelta { get; set; }
 
             /// <summary>
             /// 入力ベクトル
@@ -479,6 +651,39 @@ namespace LibPrimitiveSupportVectorMachine
             /// 分類結果(1 or -1)
             /// </summary>
             public double Y { get; set; }
+        }
+
+        public class RealAdaDeltaParam
+        {
+            /// <summary>
+            /// AdaDeltaに用いる情報
+            /// </summary>
+            private double v;
+
+            /// <summary>
+            /// AdaDeltaに用いる情報
+            /// </summary>
+            private double u;
+
+            /// <summary>
+            /// AdaDeltaのハイパーパラメータ
+            /// </summary>
+            private readonly double rho = 0.95;
+
+            private readonly double eps = 0.000001;
+
+            public double GetDelta(double grad)
+            {
+                double v2 = this.rho * this.v + (1 - this.rho) * grad * grad;
+                this.v = v2;
+
+                double dw = Math.Sqrt(this.u + this.eps) / Math.Sqrt(this.v + this.eps) * grad;
+
+                double u2 = this.rho * this.u + (1 - this.rho) * dw * dw;
+                this.u = u2;
+
+                return dw;
+            }
         }
     }
 }
